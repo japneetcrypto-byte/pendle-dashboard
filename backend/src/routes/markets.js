@@ -4,11 +4,14 @@ const { getAllMarketsFromDB, getMarketByAddress } = require('../models/Market');
 const { getDaysToMaturity, calculateDeviation } = require('../utils/calculations');
 const pool = require('../config/database');
 
-
-// Helper function to calculate 24h change
+// Helper function to calculate 24h change - OPTIMIZED
 async function calculate24hChange(marketId, currentPrice) {
   try {
-    const query24h = `
+    if (!currentPrice || currentPrice === 0) {
+      return 0;
+    }
+
+    const query = `
       SELECT pt_price
       FROM price_snapshots
       WHERE market_id = $1 
@@ -17,40 +20,20 @@ async function calculate24hChange(marketId, currentPrice) {
       LIMIT 1
     `;
     
-    const result24h = await pool.query(query24h, [marketId]);
+    const result = await pool.query(query, [marketId]);
     
-    if (result24h.rows.length > 0) {
-      const price24hAgo = parseFloat(result24h.rows[0].pt_price);
-      
-      if (price24hAgo === 0) {
-        return 0;
-      }
-      
-      const change = ((currentPrice - price24hAgo) / price24hAgo) * 100;
-      return parseFloat(change.toFixed(2));
-    }
-    
-    const queryOldest = `
-      SELECT pt_price
-      FROM price_snapshots
-      WHERE market_id = $1
-      ORDER BY timestamp ASC
-      LIMIT 1
-    `;
-    
-    const resultOldest = await pool.query(queryOldest, [marketId]);
-    
-    if (resultOldest.rows.length === 0) {
+    if (result.rows.length === 0) {
+      // No data from 24h ago, return 0 instead of calculating from oldest
       return 0;
     }
     
-    const oldestPrice = parseFloat(resultOldest.rows[0].pt_price);
+    const price24hAgo = parseFloat(result.rows[0].pt_price);
     
-    if (oldestPrice === 0) {
+    if (price24hAgo === 0) {
       return 0;
     }
     
-    const change = ((currentPrice - oldestPrice) / oldestPrice) * 100;
+    const change = ((currentPrice - price24hAgo) / price24hAgo) * 100;
     return parseFloat(change.toFixed(2));
     
   } catch (error) {
@@ -59,42 +42,49 @@ async function calculate24hChange(marketId, currentPrice) {
   }
 }
 
-
-// GET /api/markets - Returns all markets with latest prices and 24h change
+// GET /api/markets - Returns all markets with latest prices, sorted by implied APY
 router.get('/', async (req, res) => {
   try {
     const markets = await getAllMarketsFromDB();
     
     // Add calculated fields for each market
-    const enrichedMarkets = await Promise.all(markets.map(async (market) => {
-      const daysToMaturity = getDaysToMaturity(market.maturity);
-      const deviation = market.pt_price && market.theoretical_pt_price 
-        ? calculateDeviation(parseFloat(market.pt_price), parseFloat(market.theoretical_pt_price))
-        : 0;
-      
-      // Calculate 24h change
-      const change24h = await calculate24hChange(market.id, parseFloat(market.pt_price));
-      
-      return {
-        id: market.id,
-        chainId: market.chain_id,
-        address: market.market_address,
-        name: market.name,
-        symbol: market.symbol,
-        underlyingAsset: market.underlying_asset,
-        maturity: market.maturity,
-        daysToMaturity: daysToMaturity,
-        ptPrice: parseFloat(market.pt_price),
-        ptPriceUSD: parseFloat(market.pt_price_usd) || 0,
-        ytPrice: parseFloat(market.yt_price),
-        theoreticalPrice: parseFloat(market.theoretical_pt_price),
-        impliedAPY: parseFloat(market.implied_apy),
-        fixedAPY: parseFloat(market.fixed_apy),
-        deviation: parseFloat(deviation),
-        change24h: parseFloat(change24h),
-        lastUpdated: market.last_updated
-      };
-    }));
+    const enrichedMarkets = await Promise.all(
+      markets
+        .filter(m => m.pt_price && m.maturity > new Date())  // Filter out invalid markets
+        .map(async (market) => {
+          const daysToMaturity = getDaysToMaturity(market.maturity);
+          const deviation = market.pt_price && market.theoretical_pt_price 
+            ? calculateDeviation(parseFloat(market.pt_price), parseFloat(market.theoretical_pt_price))
+            : 0;
+          
+          // Calculate 24h change
+          const change24h = await calculate24hChange(market.id, parseFloat(market.pt_price));
+          
+          return {
+            id: market.id,
+            chainId: market.chain_id,
+            address: market.market_address,
+            name: market.name,
+            symbol: market.symbol,
+            underlyingAsset: market.underlying_asset,
+            maturity: market.maturity,
+            daysToMaturity: daysToMaturity,
+            ptPrice: parseFloat(market.pt_price),
+            ptPriceUSD: parseFloat(market.pt_price_usd) || 0,
+            ytPrice: parseFloat(market.yt_price),
+            theoreticalPrice: parseFloat(market.theoretical_pt_price),
+            impliedAPY: parseFloat(market.implied_apy),
+            fixedAPY: parseFloat(market.fixed_apy),
+            deviation: parseFloat(deviation),
+            change24h: change24h,  // ✅ This is the 24H % change
+            liquidity: parseFloat(market.liquidity) || 0,
+            lastUpdated: market.last_updated
+          };
+        })
+    );
+    
+    // Sort by implied APY (highest first)
+    enrichedMarkets.sort((a, b) => (b.impliedAPY || 0) - (a.impliedAPY || 0));
     
     res.json({
       success: true,
@@ -109,7 +99,6 @@ router.get('/', async (req, res) => {
     });
   }
 });
-
 
 // GET /api/markets/:address - Returns single market with history
 router.get('/:address', async (req, res) => {
@@ -128,11 +117,11 @@ router.get('/:address', async (req, res) => {
     const historyQuery = `
       SELECT 
         pt_price, pt_price_usd, yt_price, theoretical_pt_price,
-        implied_apy, fixed_apy, timestamp
+        implied_apy, fixed_apy, liquidity, timestamp
       FROM price_snapshots
       WHERE market_id = $1
       ORDER BY timestamp DESC
-      LIMIT 100
+      LIMIT 720
     `;
     
     const historyResult = await pool.query(historyQuery, [market.id]);
@@ -143,7 +132,13 @@ router.get('/:address', async (req, res) => {
     res.json({
       success: true,
       market: {
-        ...market,
+        id: market.id,
+        chainId: market.chain_id,
+        address: market.market_address,
+        name: market.name,
+        symbol: market.symbol,
+        underlyingAsset: market.underlying_asset,
+        maturity: market.maturity,
         daysToMaturity: getDaysToMaturity(market.maturity),
         ptPrice: parseFloat(market.pt_price),
         ptPriceUSD: parseFloat(market.pt_price_usd) || 0,
@@ -151,10 +146,12 @@ router.get('/:address', async (req, res) => {
         theoreticalPrice: parseFloat(market.theoretical_pt_price),
         impliedAPY: parseFloat(market.implied_apy),
         fixedAPY: parseFloat(market.fixed_apy),
-        deviation: parseFloat(market.deviation),
-        change24h: parseFloat(change24h)
+        deviation: parseFloat(market.deviation || 0),
+        change24h: change24h,  // ✅ The 24H % change
+        liquidity: parseFloat(market.liquidity) || 0,
+        lastUpdated: market.last_updated
       },
-      priceHistory: historyResult.rows
+      priceHistory: historyResult.rows.reverse()  // Chronological order
     });
   } catch (error) {
     console.error('Error in GET /markets/:address:', error);
@@ -164,7 +161,6 @@ router.get('/:address', async (req, res) => {
     });
   }
 });
-
 
 // GET /api/markets/:address/deviations - Returns deviation history
 router.get('/:address/deviations', async (req, res) => {
@@ -182,11 +178,11 @@ router.get('/:address/deviations', async (req, res) => {
     const deviationQuery = `
       SELECT 
         actual_price, expected_price, deviation_pct,
-        z_score, timestamp
+        timestamp
       FROM price_deviations
       WHERE market_id = $1
       ORDER BY timestamp DESC
-      LIMIT 100
+      LIMIT 720
     `;
     
     const result = await pool.query(deviationQuery, [market.id]);
@@ -203,6 +199,5 @@ router.get('/:address/deviations', async (req, res) => {
     });
   }
 });
-
 
 module.exports = router;

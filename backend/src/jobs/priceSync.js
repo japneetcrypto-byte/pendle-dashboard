@@ -4,7 +4,6 @@ const { upsertMarket, savePriceSnapshot } = require('../models/Market');
 const { calculateTheoreticalPrice, calculateDeviation, getDaysToMaturity, calculateImpliedAPY } = require('../utils/calculations');
 const pool = require('../config/database');
 
-
 // Main sync function - fetches and stores latest prices
 async function syncPrices() {
     console.log('🔄 Starting price sync...');
@@ -24,7 +23,6 @@ async function syncPrices() {
                 // Parse expiry date - handle multiple possible formats
                 let expiryDate;
                 
-                // Try multiple date sources in order of preference
                 if (market.expiry && !market.expiry.includes('1970')) {
                     expiryDate = new Date(market.expiry);
                 } else if (market.maturity && !market.maturity.includes('1970')) {
@@ -93,7 +91,7 @@ async function syncPrices() {
                 
                 // Extract prices from the market object
                 const ptPriceUSD = market.pt?.price?.usd;
-                const ytPrice = market.yt?.price?.usd;
+                const ytPriceUSD = market.yt?.price?.usd;
                 
                 // Get the correct base asset price for conversion
                 const baseAssetPrice = market.basePricingAsset?.price?.usd 
@@ -101,12 +99,21 @@ async function syncPrices() {
                     || market.sy?.price?.usd 
                     || 1;
                 
-                const impliedAPY = market.impliedApy ? market.impliedApy * 100 : 0;
                 const liquidity = market.liquidity?.usd;
                 
-                if (ptPriceUSD && ptPriceUSD > 0 && baseAssetPrice > 0) {
+                if (ptPriceUSD && ptPriceUSD > 0 && baseAssetPrice > 0 && ytPriceUSD && ytPriceUSD > 0) {
                     const ptInAssets = ptPriceUSD / baseAssetPrice;
+                    const ytInAssets = ytPriceUSD / baseAssetPrice;
+                    
+                    // ✅ FIXED: Calculate Implied APY from actual PT/YT prices
+                    // Formula: Implied APY = [(1 + YT/PT)^(365/days) - 1]
+                    const impliedAPYDecimal = (Math.pow(1 + (ytInAssets / ptInAssets), 365 / daysToMaturity) - 1);
+                    const impliedAPY = impliedAPYDecimal * 100;
+                    
+                    // Calculate fixed APY using the calculated PT price
                     const fixedAPY = calculateImpliedAPY(ptInAssets, daysToMaturity);
+                    
+                    // Calculate theoretical price
                     const theoreticalPrice = calculateTheoreticalPrice(
                         expiryDate,
                         fixedAPY,
@@ -123,9 +130,9 @@ async function syncPrices() {
                         marketId,
                         ptPrice: ptInAssets,
                         ptPriceUSD: ptPriceUSD,
-                        ytPrice: ytPrice || 0,
+                        ytPrice: ytInAssets,
                         theoreticalPrice,
-                        impliedAPY: impliedAPY,
+                        impliedAPY: impliedAPY,      // ✅ Now dynamic, not static!
                         fixedAPY: fixedAPY,
                         liquidity: liquidityValue,
                         timestamp: new Date()
@@ -148,7 +155,7 @@ async function syncPrices() {
                     
                     successCount++;
                     console.log(`  ✅ ${marketName}`);
-                    console.log(`     PT: ${ptInAssets.toFixed(4)} ${baseAssetName} ($${ptPriceUSD.toFixed(4)}) | Fixed APY: ${fixedAPY.toFixed(2)}% | Implied APY: ${impliedAPY.toFixed(2)}% | Days: ${daysToMaturity}`);
+                    console.log(`     PT: ${ptInAssets.toFixed(6)} ${baseAssetName} ($${ptPriceUSD.toFixed(6)}) | YT: ${ytInAssets.toFixed(6)} | Implied APY: ${impliedAPY.toFixed(2)}% | Days: ${daysToMaturity}`);
                 } else {
                     skippedCount++;
                 }

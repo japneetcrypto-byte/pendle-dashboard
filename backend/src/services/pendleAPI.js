@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const PENDLE_API = process.env.PENDLE_API_BASE;
+const PENDLE_API = process.env.PENDLE_API_BASE || "https://api-v2.pendle.finance/core";
 
 // Supported blockchain chains
 const CHAINS = {
@@ -19,9 +19,8 @@ async function getAllMarkets() {
         try {
             console.log(`Fetching markets from ${chainName}...`);
             
-            // Try the correct endpoint structure
             const response = await axios.get(
-                `${PENDLE_API}/v1/${chainId}/markets`,
+                `${PENDLE_API}/v1/${chainId}/markets`,  // ← This becomes correct now
                 { 
                     timeout: 15000,
                     headers: {
@@ -29,8 +28,8 @@ async function getAllMarkets() {
                     }
                 }
             );
+
             
-            // Handle different response structures
             let markets = [];
             if (response.data) {
                 if (Array.isArray(response.data)) {
@@ -42,7 +41,6 @@ async function getAllMarkets() {
                 }
             }
             
-            // Add chain info to each market
             const marketsWithChain = markets.map(market => ({
                 ...market,
                 chainId,
@@ -83,13 +81,88 @@ async function getMarketDetails(chainId, marketAddress) {
     }
 }
 
+// ✅ NEW: Fetch historical price data for a market
+async function getMarketHistoricalData(chainId, marketAddress, limit = 100) {
+    try {
+        // Try multiple possible endpoints for historical data
+        const endpoints = [
+            `${PENDLE_API}/v1/${chainId}/markets/${marketAddress}/history`,
+            `${PENDLE_API}/v1/${chainId}/markets/${marketAddress}/prices/history`,
+            `${PENDLE_API}/v1/${chainId}/price-history/${marketAddress}`,
+        ];
+        
+        for (const endpoint of endpoints) {
+            try {
+                const response = await axios.get(endpoint, {
+                    params: { limit, orderBy: 'timestamp', orderDirection: 'desc' },
+                    timeout: 10000,
+                    headers: { 'Accept': 'application/json' }
+                });
+                
+                if (response.data && (Array.isArray(response.data) || response.data.data || response.data.prices)) {
+                    console.log(`✅ Historical data found at: ${endpoint}`);
+                    return Array.isArray(response.data) ? response.data : (response.data.data || response.data.prices || []);
+                }
+            } catch (err) {
+                // Try next endpoint
+                continue;
+            }
+        }
+        
+        return [];
+    } catch (error) {
+        console.error(`Error fetching historical data for ${marketAddress}:`, error.message);
+        return [];
+    }
+}
+
+// ✅ NEW: Fetch historical data for all markets
+async function getAllMarketsHistoricalData(limit = 100) {
+    const allHistoricalData = {};
+    
+    try {
+        const markets = await getAllMarkets();
+        console.log(`\n📊 Fetching historical data for ${markets.length} markets...\n`);
+        
+        for (const market of markets) {
+            try {
+                const marketAddress = market.address || market.marketAddress;
+                const chainId = market.chainId;
+                
+                if (!marketAddress || !chainId) continue;
+                
+                const historicalData = await getMarketHistoricalData(chainId, marketAddress, limit);
+                
+                if (historicalData.length > 0) {
+                    allHistoricalData[marketAddress] = {
+                        chainId,
+                        name: market.pt?.proName || market.name,
+                        priceHistory: historicalData
+                    };
+                    console.log(`  ✅ ${market.pt?.proName || market.name}: ${historicalData.length} records`);
+                }
+                
+                // Rate limiting
+                await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+                console.error(`  ❌ Error fetching history for market:`, error.message);
+            }
+        }
+        
+        console.log(`\n✅ Historical data fetched for ${Object.keys(allHistoricalData).length} markets`);
+        return allHistoricalData;
+    } catch (error) {
+        console.error('❌ Error fetching all historical data:', error);
+        return {};
+    }
+}
+
 // Helper function to safely extract numeric value
 function extractNumericValue(value) {
     if (typeof value === 'number') {
         return value;
     }
     if (typeof value === 'object' && value !== null) {
-        // Try to extract from object (e.g., {usd: 123, acc: 456})
         return value.usd || value.acc || value.value || 0;
     }
     if (typeof value === 'string') {
@@ -102,7 +175,6 @@ function extractNumericValue(value) {
 // Get asset data (underlying, PT, YT prices)
 async function getAssetPrices(chainId, marketAddress) {
     try {
-        // Try fetching market data which should include prices
         const response = await axios.get(
             `${PENDLE_API}/v1/${chainId}/markets/${marketAddress}`,
             { 
@@ -113,7 +185,6 @@ async function getAssetPrices(chainId, marketAddress) {
             }
         );
         
-        // Extract price data from response
         const data = response.data;
         
         return {
@@ -132,5 +203,7 @@ module.exports = {
     getAllMarkets,
     getMarketDetails,
     getAssetPrices,
+    getMarketHistoricalData,      // ✅ NEW
+    getAllMarketsHistoricalData,  // ✅ NEW
     CHAINS
 };
