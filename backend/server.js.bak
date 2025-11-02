@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const marketRoutes = require('./src/routes/markets');
 const { startPriceSyncJob, triggerManualSync } = require('./src/jobs/priceSync');
-const { startDailyUtcSnapshotCron } = require('./src/jobs/dailyUtcSnapshot');  // PHASE 2: NEW
 const pool = require('./src/config/database');
 
 const app = express();
@@ -39,24 +38,22 @@ app.post('/api/sync', async (req, res) => {
 });
 
 // Start server
-const server = app.listen(PORT, () => {
-    console.log(`\n🚀 Server running on port ${PORT}\n`);
+app.listen(PORT, () => {
+    console.log(`
+    🚀 Server started successfully!
+    📡 Listening on port ${PORT}
+    🌐 Health check: http://localhost:${PORT}/health
+    📊 Markets API: http://localhost:${PORT}/api/markets
+    ✅ CORS enabled for: localhost:3000, 127.0.0.1:3000, 192.168.1.4:3000
+    `);
     
-    // Start price sync cron job
+    // Start the automated price sync job
     startPriceSyncJob();
-    
-    // PHASE 2: Start daily UTC snapshot cron job
-    startDailyUtcSnapshotCron();
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM signal received: closing HTTP server');
-    server.close(() => {
-        console.log('HTTP server closed');
-        pool.end(() => {
-            console.log('Database connection pool closed');
-            process.exit(0);
-        });
-    });
+process.on('SIGTERM', async () => {
+    console.log('🛑 Shutting down gracefully...');
+    await pool.end();
+    process.exit(0);
 });
